@@ -1,0 +1,94 @@
+# Kao RPC proxy — v1
+# Deploy identically on both servers (rpc1.kaowallet.org / rpc2.kaowallet.org).
+# Run with: DRPC_KEY=... caddy run --config /etc/caddy/Caddyfile
+# (better: systemd unit with EnvironmentFile=/etc/caddy/env, chmod 600)
+#
+# Privacy invariants:
+#   - No `log` directive anywhere => Caddy writes no access logs.
+#   - All client-identifying headers are stripped before forwarding upstream,
+#     so dRPC sees the VPS IP, not the user's.
+#   - The dRPC key never appears in client-facing URLs.
+
+{
+	admin off
+	email iamwehi@proton.me
+}
+
+# Reusable upstream config: strip everything that could identify the user.
+(drpc_upstream) {
+	reverse_proxy https://lb.drpc.live {
+		header_up Host lb.drpc.live
+		header_up -X-Forwarded-For
+		header_up -X-Forwarded-Host
+		header_up -X-Forwarded-Proto
+		header_up -X-Real-IP
+		header_up -Forwarded
+		header_up -Origin
+		header_up -Referer
+		header_up -Cookie
+		header_up -Accept-Language
+		header_up User-Agent "kao-rpc-proxy/1.0"
+		header_up Drpc-Key {$DRPC_KEY}
+		transport http {
+			versions h2 1.1
+		}
+	}
+}
+
+# api2.kaowallet.com {
+api1.kaowallet.com {
+	encode zstd gzip
+
+	# Health endpoint for client-side failover (Kao ships a static
+	# endpoint list and rotates on failure).
+	@health {
+		method GET
+		path /health
+	}
+	respond @health 200
+
+	# Optional per-IP rate limit. Requires:
+	#   xcaddy build --with github.com/mholt/caddy-ratelimit
+	# rate_limit {
+	# 	zone per_ip {
+	# 		key {client_ip}
+	# 		events 60
+	# 		window 10s
+	# 	}
+	# }
+
+	# ---------------------------------------------------------------
+	# JSON-RPC:  POST /rpc/{chain}  ->  https://lb.drpc.live/{chain}
+	# Auth via Drpc-Key header (dRPC's recommended method) so the key
+	# never appears in any URL.
+	# ---------------------------------------------------------------
+	@rpc {
+		method POST
+		path_regexp rpc ^/rpc/(ethereum|sepolia|optimism|arbitrum|base|polygon)$
+	}
+	handle @rpc {
+		rewrite * /{re.rpc.1}
+		import drpc_upstream
+	}
+
+	# ---------------------------------------------------------------
+	# Wallet API:  GET /wallet/{chain}/{rest}
+	#   ->  https://lb.drpc.live/{chain}/{KEY}/lambda/v2/{rest}
+	# Key is embedded in the upstream path (documented format).
+	# e.g. client calls:
+	#   GET /wallet/ethereum/wallets/0xabc.../balances
+	# ---------------------------------------------------------------
+	@wallet {
+		method GET
+		path_regexp w ^/wallet/(ethereum|optimism|arbitrum|base|polygon)/(.+)$
+	}
+	handle @wallet {
+		rewrite * /{re.w.1}/{$DRPC_KEY}/lambda/v2/{re.w.2}
+		import drpc_upstream
+	}
+
+	# Everything else: drop.
+	handle {
+		respond 404
+	}
+}
