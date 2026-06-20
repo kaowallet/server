@@ -2,7 +2,7 @@
 //!
 //! Each test spins up a wiremock `MockServer` that plays the role of dRPC and
 //! exercises the full axum router through `tower::ServiceExt::oneshot` — no TCP
-//! port needed, but every layer (routing, validation, method filtering, fan-out,
+//! port needed, but every layer (routing, validation, method filtering,
 //! upstream HTTP) is exercised.
 
 use axum::body::Body;
@@ -44,8 +44,8 @@ async fn app(method_denylist: bool) -> (Router, MockServer) {
     let router = Router::new()
         .route("/healthz", get(routes::health))
         .route("/rpc/{chain}", post(routes::rpc_handler))
-        .route("/v1/portfolio/{address}", get(routes::portfolio_handler))
-        .route("/v1/history/{address}", get(routes::history_handler))
+        .route("/v1/{chain}/balances/{address}", get(routes::balances_handler))
+        .route("/v1/{chain}/history/{address}", get(routes::history_handler))
         .layer(DefaultBodyLimit::max(1 << 20))
         .with_state(state);
     (router, mock)
@@ -55,8 +55,15 @@ fn rpc_path(chain: &str) -> String {
     format!("/{chain}/{TEST_KEY}")
 }
 
-fn wallet_path(chain: &str, addr: &str, suffix: &str) -> String {
-    format!("/{chain}/{TEST_KEY}/lambda/v2/wallets/{addr}/{suffix}")
+/// Upstream dRPC path for the balances Wallet-API call.
+fn balances_path(chain: &str, addr: &str) -> String {
+    format!("/{chain}/{TEST_KEY}/lambda/v2/wallets/{addr}/balances")
+}
+
+/// Upstream dRPC path for the transaction-history Wallet-API call. History
+/// lives under `lambda/v1/transactions/{addr}/history`, NOT `v2/wallets`.
+fn history_path(chain: &str, addr: &str) -> String {
+    format!("/{chain}/{TEST_KEY}/lambda/v1/transactions/{addr}/history")
 }
 
 async fn collect_body(resp: axum::http::Response<Body>) -> Vec<u8> {
@@ -65,35 +72,6 @@ async fn collect_body(resp: axum::http::Response<Body>) -> Vec<u8> {
 
 async fn collect_json(resp: axum::http::Response<Body>) -> Value {
     serde_json::from_slice(&collect_body(resp).await).unwrap()
-}
-
-/// Mount balance mocks for every default chain, returning the mock response
-/// body used for successful chains.
-async fn mount_balance_mocks(mock: &MockServer) -> Value {
-    let body = json!({ "data": [{ "token": "ETH", "balance": "1.5" }] });
-    for chain in ["ethereum", "optimism", "base"] {
-        Mock::given(method("GET"))
-            .and(path(wallet_path(chain, VALID_ADDR, "balances")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-            .expect(1)
-            .mount(mock)
-            .await;
-    }
-    body
-}
-
-/// Mount transaction mocks for every default chain.
-async fn mount_tx_mocks(mock: &MockServer) -> Value {
-    let body = json!({ "data": [{ "hash": "0xabc", "value": "0.1" }] });
-    for chain in ["ethereum", "optimism", "base"] {
-        Mock::given(method("GET"))
-            .and(path(wallet_path(chain, VALID_ADDR, "transactions")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-            .expect(1)
-            .mount(mock)
-            .await;
-    }
-    body
 }
 
 // ===========================================================================
@@ -523,18 +501,25 @@ async fn rpc_non_object_non_array_body() {
 }
 
 // ===========================================================================
-// Portfolio — fan-out balances
+// Balances — per-chain passthrough
 // ===========================================================================
 
 #[tokio::test]
-async fn portfolio_fans_out_to_all_chains() {
+async fn balances_passthrough_returns_upstream_body() {
     let (app, mock) = app(true).await;
-    let expected = mount_balance_mocks(&mock).await;
+    let body = json!({ "data": { "assets": [{ "type": "token" }] } });
+
+    Mock::given(method("GET"))
+        .and(path(balances_path("optimism", VALID_ADDR)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+        .expect(1)
+        .mount(&mock)
+        .await;
 
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/portfolio/{VALID_ADDR}"))
+                .uri(format!("/v1/optimism/balances/{VALID_ADDR}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -542,24 +527,107 @@ async fn portfolio_fans_out_to_all_chains() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let json = collect_json(resp).await;
-
-    assert_eq!(json["address"], VALID_ADDR);
-    for chain in ["ethereum", "optimism", "base"] {
-        let r = &json["results"][chain];
-        assert_eq!(r["ok"], true, "chain {chain} should succeed");
-        assert_eq!(r["data"], expected, "chain {chain} data mismatch");
-    }
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert_eq!(ct, "application/json");
+    // Body returned verbatim — no envelope wrapping.
+    assert_eq!(collect_json(resp).await, body);
 }
 
 #[tokio::test]
-async fn portfolio_invalid_address_too_short() {
+async fn balances_resolves_chain_alias() {
+    let (app, mock) = app(true).await;
+    let body = json!({ "data": { "assets": [] } });
+
+    // `mainnet` (alias) must resolve to the `ethereum` dRPC slug.
+    Mock::given(method("GET"))
+        .and(path(balances_path("ethereum", VALID_ADDR)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/mainnet/balances/{VALID_ADDR}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn balances_forwards_upstream_error_status_and_body() {
+    let (app, mock) = app(true).await;
+
+    // dRPC's free-tier rejection: status + diagnostic body must reach the
+    // wallet intact (the wallet surfaces this body in its error string).
+    Mock::given(method("GET"))
+        .and(path(balances_path("ethereum", VALID_ADDR)))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({"message":"method is not available on freetier","code":35})),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/ethereum/balances/{VALID_ADDR}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(collect_json(resp).await["code"], 35);
+}
+
+#[tokio::test]
+async fn balances_forwards_query_string() {
+    let (app, mock) = app(true).await;
+
+    Mock::given(method("GET"))
+        .and(path(balances_path("base", VALID_ADDR)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "assets": [] } })))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/base/balances/{VALID_ADDR}?asset_type=TOKEN&include_zero_price_tokens=false"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = mock.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].url.query(),
+        Some("asset_type=TOKEN&include_zero_price_tokens=false"),
+    );
+}
+
+#[tokio::test]
+async fn balances_invalid_address_too_short() {
     let (app, _mock) = app(true).await;
 
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/portfolio/0xdead")
+                .uri("/v1/ethereum/balances/0xdead")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -571,31 +639,14 @@ async fn portfolio_invalid_address_too_short() {
 }
 
 #[tokio::test]
-async fn portfolio_invalid_address_no_prefix() {
-    let (app, _mock) = app(true).await;
-
-    // 42 chars but missing 0x prefix.
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/portfolio/d8da6bf26964af9d7eed9e03e53415d37aa9604500")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn portfolio_invalid_address_non_hex() {
+async fn balances_invalid_address_non_hex() {
     let (app, _mock) = app(true).await;
 
     // 0x + 40 chars, but contains 'zz'.
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/portfolio/0xzz00000000000000000000000000000000000000")
+                .uri("/v1/ethereum/balances/0xzz00000000000000000000000000000000000000")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -605,26 +656,37 @@ async fn portfolio_invalid_address_non_hex() {
 }
 
 #[tokio::test]
-async fn portfolio_partial_upstream_failure() {
-    let (app, mock) = app(true).await;
-    let ok_body = json!({ "data": [{ "token": "ETH", "balance": "1.0" }] });
+async fn wallet_unknown_chain_returns_404() {
+    let (app, _mock) = app(true).await;
 
-    // Ethereum succeeds, optimism returns 500, base succeeds.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/solana/balances/{VALID_ADDR}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let json = collect_json(resp).await;
+    assert_eq!(json["error"]["message"], "unknown chain");
+}
+
+// ===========================================================================
+// History — per-chain passthrough
+// ===========================================================================
+
+#[tokio::test]
+async fn history_passthrough_uses_v1_transactions_path() {
+    let (app, mock) = app(true).await;
+    let body = json!({ "data": [{ "hash": "0xabc", "type": "receive" }] });
+
+    // The mock only matches the corrected `lambda/v1/transactions/.../history`
+    // path; the request 404s here if the proxy regresses to `v2/wallets`.
     Mock::given(method("GET"))
-        .and(path(wallet_path("ethereum", VALID_ADDR, "balances")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&ok_body))
-        .expect(1)
-        .mount(&mock)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(wallet_path("optimism", VALID_ADDR, "balances")))
-        .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
-        .expect(1)
-        .mount(&mock)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(wallet_path("base", VALID_ADDR, "balances")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&ok_body))
+        .and(path(history_path("ethereum", VALID_ADDR)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
         .expect(1)
         .mount(&mock)
         .await;
@@ -632,48 +694,32 @@ async fn portfolio_partial_upstream_failure() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/portfolio/{VALID_ADDR}"))
+                .uri(format!("/v1/ethereum/history/{VALID_ADDR}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    // The envelope is still 200 even when individual chains fail.
     assert_eq!(resp.status(), StatusCode::OK);
-    let json = collect_json(resp).await;
-
-    assert_eq!(json["results"]["ethereum"]["ok"], true);
-    assert_eq!(json["results"]["base"]["ok"], true);
-    assert_eq!(json["results"]["optimism"]["ok"], false);
-    assert!(
-        json["results"]["optimism"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("500"),
-        "error should mention the upstream status"
-    );
+    assert_eq!(collect_json(resp).await, body);
 }
 
 #[tokio::test]
-async fn portfolio_forwards_query_string() {
+async fn history_forwards_limit_query() {
     let (app, mock) = app(true).await;
-    let body = json!({ "data": [] });
 
-    // Mount mocks with no query constraint; we verify via received_requests.
-    for chain in ["ethereum", "optimism", "base"] {
-        Mock::given(method("GET"))
-            .and(path(wallet_path(chain, VALID_ADDR, "balances")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-            .expect(1)
-            .mount(&mock)
-            .await;
-    }
+    Mock::given(method("GET"))
+        .and(path(history_path("base", VALID_ADDR)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .expect(1)
+        .mount(&mock)
+        .await;
 
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/portfolio/{VALID_ADDR}?page_size=10&cursor=abc"))
+                .uri(format!("/v1/base/history/{VALID_ADDR}?limit=25"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -681,43 +727,9 @@ async fn portfolio_forwards_query_string() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Verify the upstream requests carried the query string.
     let received = mock.received_requests().await.unwrap();
-    assert_eq!(received.len(), 3);
-    for req in &received {
-        let url = &req.url;
-        assert_eq!(url.query(), Some("page_size=10&cursor=abc"));
-    }
-}
-
-// ===========================================================================
-// History — fan-out transactions
-// ===========================================================================
-
-#[tokio::test]
-async fn history_fans_out_to_all_chains() {
-    let (app, mock) = app(true).await;
-    let expected = mount_tx_mocks(&mock).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v1/history/{VALID_ADDR}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = collect_json(resp).await;
-
-    assert_eq!(json["address"], VALID_ADDR);
-    for chain in ["ethereum", "optimism", "base"] {
-        let r = &json["results"][chain];
-        assert_eq!(r["ok"], true, "chain {chain} should succeed");
-        assert_eq!(r["data"], expected, "chain {chain} data mismatch");
-    }
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].url.query(), Some("limit=25"));
 }
 
 #[tokio::test]
@@ -727,7 +739,7 @@ async fn history_invalid_address() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/history/not-an-address")
+                .uri("/v1/ethereum/history/not-an-address")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -798,7 +810,7 @@ async fn error_responses_use_json_envelope() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/portfolio/bad")
+                .uri("/v1/ethereum/balances/bad")
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -6,11 +6,17 @@
 //!    the address, and the query string the caller asked for.
 //!  - URLs contain the API key (dRPC puts it in the path). They are NEVER logged
 //!    and NEVER returned in errors.
+//!
+//! All three calls are passthroughs: once dRPC answers, we return its status
+//! and body unchanged. The wallet therefore sees real JSON-RPC error objects,
+//! gas estimates, and dRPC's own diagnostics (e.g. the free-tier
+//! `{"message":"method is not available on freetier","code":35}`) instead of a
+//! status we invented. The only error we raise ourselves is `Transport`, for
+//! failures that happen before dRPC produces a response.
 
 use crate::config::Key;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::Client;
-use serde_json::Value;
 
 pub struct Drpc {
     client: Client,
@@ -20,21 +26,16 @@ pub struct Drpc {
 
 #[derive(Debug)]
 pub enum UpstreamError {
-    /// Network/TLS/timeout — anything before we got an HTTP response.
+    /// Network/TLS/timeout — anything before we got an HTTP response. Once dRPC
+    /// answers, its status and body are passed through verbatim, never
+    /// collapsed into an error.
     Transport,
-    /// dRPC answered with a non-2xx status (wallet-API calls only; raw RPC
-    /// relays the status verbatim instead).
-    Status(u16),
-    /// Body was not the JSON we expected.
-    Decode,
 }
 
 impl std::fmt::Display for UpstreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UpstreamError::Transport => write!(f, "upstream transport error"),
-            UpstreamError::Status(c) => write!(f, "upstream status {c}"),
-            UpstreamError::Decode => write!(f, "upstream decode error"),
         }
     }
 }
@@ -45,8 +46,7 @@ impl Drpc {
         Self { client, base, key }
     }
 
-    /// JSON-RPC passthrough. Returns dRPC's status and body unchanged so the
-    /// wallet sees real JSON-RPC error objects, gas estimates, etc.
+    /// JSON-RPC passthrough. Returns dRPC's status and body unchanged.
     pub async fn rpc(&self, chain: &str, body: &[u8]) -> Result<(u16, Vec<u8>), UpstreamError> {
         let url = format!("{}/{}/{}", self.base, chain, self.key.expose());
         let resp = self
@@ -62,49 +62,46 @@ impl Drpc {
         Ok((status, bytes.to_vec()))
     }
 
-    /// Wallet API: current portfolio (native + ERC-20 + DeFi) on one chain.
-    /// VERIFY the path/shape against your dashboard (see README).
+    /// Wallet API: balances (native + ERC-20) on one chain. Mirrors dRPC's
+    /// `GET …/lambda/v2/wallets/{address}/balances`; status and body verbatim.
     pub async fn balances(
         &self,
         chain: &str,
         address: &str,
         query: Option<&str>,
-    ) -> Result<Value, UpstreamError> {
-        let url = self.wallet_url(chain, address, "balances", query);
-        self.get_json(&url).await
+    ) -> Result<(u16, Vec<u8>), UpstreamError> {
+        let mut url = format!(
+            "{}/{}/{}/lambda/v2/wallets/{}/balances",
+            self.base,
+            chain,
+            self.key.expose(),
+            address,
+        );
+        append_query(&mut url, query);
+        self.get(&url).await
     }
 
-    /// Wallet API: transaction history on one chain. VERIFY the suffix
-    /// (`transactions`) against the "Get Transactions History" doc.
+    /// Wallet API: transaction history on one chain. Mirrors dRPC's
+    /// `GET …/lambda/v1/transactions/{address}/history` — note the history
+    /// endpoint lives under `lambda/v1/transactions`, NOT `v2/wallets`.
     pub async fn transactions(
         &self,
         chain: &str,
         address: &str,
         query: Option<&str>,
-    ) -> Result<Value, UpstreamError> {
-        let url = self.wallet_url(chain, address, "transactions", query);
-        self.get_json(&url).await
-    }
-
-    fn wallet_url(&self, chain: &str, address: &str, suffix: &str, query: Option<&str>) -> String {
+    ) -> Result<(u16, Vec<u8>), UpstreamError> {
         let mut url = format!(
-            "{}/{}/{}/lambda/v2/wallets/{}/{}",
+            "{}/{}/{}/lambda/v1/transactions/{}/history",
             self.base,
             chain,
             self.key.expose(),
             address,
-            suffix
         );
-        if let Some(q) = query {
-            if !q.is_empty() {
-                url.push('?');
-                url.push_str(q);
-            }
-        }
-        url
+        append_query(&mut url, query);
+        self.get(&url).await
     }
 
-    async fn get_json(&self, url: &str) -> Result<Value, UpstreamError> {
+    async fn get(&self, url: &str) -> Result<(u16, Vec<u8>), UpstreamError> {
         let resp = self
             .client
             .get(url)
@@ -112,10 +109,18 @@ impl Drpc {
             .send()
             .await
             .map_err(|_| UpstreamError::Transport)?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(UpstreamError::Status(status.as_u16()));
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await.map_err(|_| UpstreamError::Transport)?;
+        Ok((status, bytes.to_vec()))
+    }
+}
+
+/// Append `?query` to `url` when the caller supplied a non-empty query string.
+fn append_query(url: &mut String, query: Option<&str>) {
+    if let Some(q) = query {
+        if !q.is_empty() {
+            url.push('?');
+            url.push_str(q);
         }
-        resp.json::<Value>().await.map_err(|_| UpstreamError::Decode)
     }
 }

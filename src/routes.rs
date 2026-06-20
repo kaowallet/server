@@ -1,16 +1,18 @@
 //! HTTP surface.
 //!
 //! Routes:
-//!   GET  /healthz                  liveness, no upstream
-//!   POST /rpc/{chain}              JSON-RPC passthrough (chain alias -> dRPC slug)
-//!   GET  /v1/portfolio/{address}   balances fanned out across all chains
-//!   GET  /v1/history/{address}     transactions fanned out across all chains
+//!   GET  /healthz                        liveness, no upstream
+//!   POST /rpc/{chain}                     JSON-RPC passthrough (alias -> dRPC slug)
+//!   GET  /v1/{chain}/balances/{address}   Wallet-API balances for one chain
+//!   GET  /v1/{chain}/history/{address}    Wallet-API tx history for one chain
 //!
-//! Portfolio/history return a per-chain *envelope* rather than a merged total.
-//! That keeps this proxy schema-agnostic (it forwards dRPC's JSON verbatim per
-//! chain), degrades gracefully when one chain errors, and leaves merging to the
-//! wallet — which re-verifies balances on-chain via Helios anyway, treating this
-//! endpoint as an untrusted discovery source.
+//! The wallet-API routes are a thin per-chain mirror of dRPC's Wallet API: the
+//! proxy resolves the chain alias to a dRPC slug, injects the shared key,
+//! forwards the caller's query string verbatim, and returns dRPC's status and
+//! body unchanged. It does NOT merge chains or reshape the payload — the wallet
+//! calls one chain at a time (its `Indexer` is per-chain) and re-verifies
+//! balances on-chain via Helios anyway, treating this as an untrusted discovery
+//! source.
 
 use crate::config::ChainSpec;
 use crate::upstream::{Drpc, UpstreamError};
@@ -19,11 +21,8 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::task::JoinSet;
 
 pub struct AppState {
     pub drpc: Drpc,
@@ -56,99 +55,48 @@ pub async fn rpc_handler(
         reject_denied_methods(&body)?;
     }
     let (code, out) = state.drpc.rpc(slug, &body).await?;
-    let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY);
-    Ok((
-        status,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
-        out,
-    )
-        .into_response())
+    Ok(json_passthrough(code, out))
 }
 
-pub async fn portfolio_handler(
+pub async fn balances_handler(
     State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
+    Path((chain, address)): Path<(String, String)>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Envelope>, AppError> {
+) -> Result<Response, AppError> {
+    let slug = state.resolve_chain(&chain).ok_or(AppError::UnknownChain)?;
     if !is_valid_eth_address(&address) {
         return Err(AppError::BadAddress);
     }
-    Ok(Json(fan_out(state, Kind::Balances, address, query).await))
+    let (code, body) = state.drpc.balances(slug, &address, query.as_deref()).await?;
+    Ok(json_passthrough(code, body))
 }
 
 pub async fn history_handler(
     State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
+    Path((chain, address)): Path<(String, String)>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Envelope>, AppError> {
+) -> Result<Response, AppError> {
+    let slug = state.resolve_chain(&chain).ok_or(AppError::UnknownChain)?;
     if !is_valid_eth_address(&address) {
         return Err(AppError::BadAddress);
     }
-    Ok(Json(fan_out(state, Kind::Transactions, address, query).await))
+    let (code, body) = state
+        .drpc
+        .transactions(slug, &address, query.as_deref())
+        .await?;
+    Ok(json_passthrough(code, body))
 }
 
-// ---- fan-out -----------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-enum Kind {
-    Balances,
-    Transactions,
-}
-
-#[derive(Serialize)]
-pub struct Envelope {
-    address: String,
-    results: BTreeMap<String, ChainResult>,
-}
-
-#[derive(Serialize)]
-pub struct ChainResult {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-impl ChainResult {
-    fn ok(data: Value) -> Self {
-        Self { ok: true, data: Some(data), error: None }
-    }
-    fn err(msg: String) -> Self {
-        Self { ok: false, data: None, error: Some(msg) }
-    }
-}
-
-async fn fan_out(state: Arc<AppState>, kind: Kind, address: String, query: Option<String>) -> Envelope {
-    let mut set: JoinSet<(String, Result<Value, UpstreamError>)> = JoinSet::new();
-
-    for chain in &state.chains {
-        let st = state.clone();
-        let slug = chain.slug.to_string();
-        let addr = address.clone();
-        let q = query.clone();
-        set.spawn(async move {
-            let res = match kind {
-                Kind::Balances => st.drpc.balances(&slug, &addr, q.as_deref()).await,
-                Kind::Transactions => st.drpc.transactions(&slug, &addr, q.as_deref()).await,
-            };
-            (slug, res)
-        });
-    }
-
-    let mut results = BTreeMap::new();
-    while let Some(joined) = set.join_next().await {
-        if let Ok((slug, res)) = joined {
-            let entry = match res {
-                Ok(data) => ChainResult::ok(data),
-                Err(e) => ChainResult::err(e.to_string()),
-            };
-            results.insert(slug, entry);
-        }
-        // A JoinError here means a task panicked; we simply omit that chain.
-    }
-
-    Envelope { address, results }
+/// Build a passthrough response: upstream status (clamped to a valid code),
+/// `application/json`, and the upstream body verbatim.
+fn json_passthrough(code: u16, body: Vec<u8>) -> Response {
+    let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY);
+    (
+        status,
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        body,
+    )
+        .into_response()
 }
 
 // ---- validation & method filtering ------------------------------------------
@@ -200,11 +148,9 @@ pub enum AppError {
 
 impl From<UpstreamError> for AppError {
     fn from(e: UpstreamError) -> Self {
-        AppError::Upstream(match e {
-            UpstreamError::Transport => "upstream transport error",
-            UpstreamError::Status(_) => "upstream returned error status",
-            UpstreamError::Decode => "upstream returned invalid JSON",
-        })
+        match e {
+            UpstreamError::Transport => AppError::Upstream("upstream transport error"),
+        }
     }
 }
 

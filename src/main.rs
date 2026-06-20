@@ -29,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = Router::new()
         .route("/healthz", get(routes::health))
         .route("/rpc/{chain}", post(routes::rpc_handler))
-        .route("/v1/portfolio/{address}", get(routes::portfolio_handler))
-        .route("/v1/history/{address}", get(routes::history_handler))
+        .route("/v1/{chain}/balances/{address}", get(routes::balances_handler))
+        .route("/v1/{chain}/history/{address}", get(routes::history_handler))
         .layer(DefaultBodyLimit::max(cfg.body_limit))
         .with_state(state);
 
