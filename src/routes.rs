@@ -67,7 +67,10 @@ pub async fn balances_handler(
     if !is_valid_eth_address(&address) {
         return Err(AppError::BadAddress);
     }
-    let (code, body) = state.drpc.balances(slug, &address, query.as_deref()).await?;
+    let (code, body) = state
+        .drpc
+        .balances(slug, &address, query.as_deref())
+        .await?;
     Ok(json_passthrough(code, body))
 }
 
@@ -93,7 +96,10 @@ fn json_passthrough(code: u16, body: Vec<u8>) -> Response {
     let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY);
     (
         status,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
         body,
     )
         .into_response()
@@ -163,6 +169,10 @@ impl IntoResponse for AppError {
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
         };
-        (status, Json(serde_json::json!({ "error": { "message": msg } }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "error": { "message": msg } })),
+        )
+            .into_response()
     }
 }

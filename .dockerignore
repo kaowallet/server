@@ -1,0 +1,18 @@
+# Build artifacts (huge — keep out of the build context)
+target/
+
+# VCS
+.git/
+.gitignore
+
+# Tooling, docs, and orchestration not needed to compile the binary
+.claude/
+CLAUDE.md
+.devcontainer/
+tests/
+supply-chain/
+deny.toml
+LICENSE
+Caddyfile
+compose.yaml
+*.md

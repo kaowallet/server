@@ -8,7 +8,9 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     let cfg = config::Config::from_env()?;
 
@@ -29,8 +31,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = Router::new()
         .route("/healthz", get(routes::health))
         .route("/rpc/{chain}", post(routes::rpc_handler))
-        .route("/v1/{chain}/balances/{address}", get(routes::balances_handler))
-        .route("/v1/{chain}/history/{address}", get(routes::history_handler))
+        .route(
+            "/v1/{chain}/balances/{address}",
+            get(routes::balances_handler),
+        )
+        .route(
+            "/v1/{chain}/history/{address}",
+            get(routes::history_handler),
+        )
         .layer(DefaultBodyLimit::max(cfg.body_limit))
         .with_state(state);
 

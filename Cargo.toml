@@ -8,7 +8,7 @@ description = "Privacy-respecting KISS proxy in front of dRPC: RPC passthrough +
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.8"
-# rustls + webpki roots => no system cert store, no openssl-sys. Recent reqwest pulls aws-lc-rs.
+# rustls + webpki roots => no system cert store, no openssl-sys. Uses the ring crypto backend.
 reqwest = { version = "0.12", default-features = false, features = ["json", "http2", "rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

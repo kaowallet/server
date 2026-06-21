@@ -44,8 +44,14 @@ async fn app(method_denylist: bool) -> (Router, MockServer) {
     let router = Router::new()
         .route("/healthz", get(routes::health))
         .route("/rpc/{chain}", post(routes::rpc_handler))
-        .route("/v1/{chain}/balances/{address}", get(routes::balances_handler))
-        .route("/v1/{chain}/history/{address}", get(routes::history_handler))
+        .route(
+            "/v1/{chain}/balances/{address}",
+            get(routes::balances_handler),
+        )
+        .route(
+            "/v1/{chain}/history/{address}",
+            get(routes::history_handler),
+        )
         .layer(DefaultBodyLimit::max(1 << 20))
         .with_state(state);
     (router, mock)
@@ -67,7 +73,12 @@ fn history_path(chain: &str, addr: &str) -> String {
 }
 
 async fn collect_body(resp: axum::http::Response<Body>) -> Vec<u8> {
-    resp.into_body().collect().await.unwrap().to_bytes().to_vec()
+    resp.into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
 }
 
 async fn collect_json(resp: axum::http::Response<Body>) -> Value {
@@ -82,7 +93,12 @@ async fn collect_json(resp: axum::http::Response<Body>) -> Value {
 async fn health_returns_ok() {
     let (app, _mock) = app(true).await;
     let resp = app
-        .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -233,10 +249,9 @@ async fn rpc_upstream_status_is_forwarded() {
     // Upstream returns 429 Too Many Requests.
     Mock::given(method("POST"))
         .and(path(rpc_path("ethereum")))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .set_body_json(json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}})),
-        )
+        .respond_with(ResponseTemplate::new(429).set_body_json(
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}),
+        ))
         .expect(1)
         .mount(&mock)
         .await;
@@ -527,7 +542,12 @@ async fn balances_passthrough_returns_upstream_body() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/json");
     // Body returned verbatim — no envelope wrapping.
     assert_eq!(collect_json(resp).await, body);
@@ -795,7 +815,12 @@ async fn rpc_does_not_leak_client_headers() {
     assert!(upstream_req.headers.get("origin").is_none());
     assert!(upstream_req.headers.get("referer").is_none());
     // The proxy sets its own User-Agent.
-    let ua = upstream_req.headers.get("user-agent").unwrap().to_str().unwrap();
+    let ua = upstream_req
+        .headers
+        .get("user-agent")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ua.starts_with("kao-proxy"), "unexpected user-agent: {ua}");
 }
 
@@ -821,8 +846,14 @@ async fn error_responses_use_json_envelope() {
     let json = collect_json(resp).await;
     // All error responses should have { "error": { "message": "..." } }.
     assert!(json.get("error").is_some(), "missing error key");
-    assert!(json["error"].get("message").is_some(), "missing error.message");
-    assert!(json["error"]["message"].is_string(), "error.message not a string");
+    assert!(
+        json["error"].get("message").is_some(),
+        "missing error.message"
+    );
+    assert!(
+        json["error"]["message"].is_string(),
+        "error.message not a string"
+    );
 }
 
 // ===========================================================================
@@ -896,6 +927,11 @@ async fn rpc_response_has_json_content_type() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/json");
 }

@@ -39,9 +39,21 @@ pub struct ChainSpec {
 
 pub fn default_chains() -> Vec<ChainSpec> {
     vec![
-        ChainSpec { slug: "ethereum", chain_id: 1, aliases: &["mainnet", "eth", "1"] },
-        ChainSpec { slug: "optimism", chain_id: 10, aliases: &["op", "10"] },
-        ChainSpec { slug: "base", chain_id: 8453, aliases: &["8453"] },
+        ChainSpec {
+            slug: "ethereum",
+            chain_id: 1,
+            aliases: &["mainnet", "eth", "1"],
+        },
+        ChainSpec {
+            slug: "optimism",
+            chain_id: 10,
+            aliases: &["op", "10"],
+        },
+        ChainSpec {
+            slug: "base",
+            chain_id: 8453,
+            aliases: &["8453"],
+        },
     ]
 }
 
@@ -68,7 +80,8 @@ impl Config {
 
         // Docs show `https://lb.drpc.live`. Some dashboards hand out `lb.drpc.org`.
         // Override with DRPC_BASE if yours differs. No trailing slash.
-        let drpc_base = std::env::var("DRPC_BASE").unwrap_or_else(|_| "https://lb.drpc.live".into());
+        let drpc_base =
+            std::env::var("DRPC_BASE").unwrap_or_else(|_| "https://lb.drpc.live".into());
 
         Ok(Config {
             bind,
@@ -76,7 +89,9 @@ impl Config {
             key: load_key()?,
             chains: default_chains(),
             body_limit: env_usize("RPC_BODY_LIMIT_BYTES", 1 << 20), // 1 MiB
-            method_denylist: std::env::var("RPC_METHOD_FILTER").map(|v| v != "off").unwrap_or(true),
+            method_denylist: std::env::var("RPC_METHOD_FILTER")
+                .map(|v| v != "off")
+                .unwrap_or(true),
             upstream_timeout: Duration::from_secs(env_u64("UPSTREAM_TIMEOUT_SECS", 20)),
             connect_timeout: Duration::from_secs(env_u64("UPSTREAM_CONNECT_TIMEOUT_SECS", 8)),
         })
@@ -102,9 +117,15 @@ fn load_key() -> Result<Key, String> {
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
