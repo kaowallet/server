@@ -52,7 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
       - run: cargo deny check advisories bans licenses sources
 
   vet:
@@ -61,5 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-vet
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vet@0.10.2
       - run: cargo vet --locked
