@@ -15,8 +15,8 @@
 //! failures that happen before dRPC produces a response.
 
 use crate::config::Key;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::Client;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
 
 pub struct Drpc {
     client: Client,
@@ -117,10 +117,10 @@ impl Drpc {
 
 /// Append `?query` to `url` when the caller supplied a non-empty query string.
 fn append_query(url: &mut String, query: Option<&str>) {
-    if let Some(q) = query {
-        if !q.is_empty() {
-            url.push('?');
-            url.push_str(q);
-        }
+    if let Some(q) = query
+        && !q.is_empty()
+    {
+        url.push('?');
+        url.push_str(q);
     }
 }

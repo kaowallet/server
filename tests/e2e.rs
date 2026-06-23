@@ -5,16 +5,16 @@
 //! port needed, but every layer (routing, validation, method filtering,
 //! upstream HTTP) is exercised.
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
-use axum::Router;
 use http_body_util::BodyExt;
-use kao_proxy::config::{default_chains, Key};
+use kao_proxy::config::{Key, default_chains};
 use kao_proxy::routes::{self, AppState};
 use kao_proxy::upstream::Drpc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};

@@ -1,7 +1,10 @@
+[workspace]
+members = ["xtask"]
+
 [package]
 name = "kao-proxy"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Privacy-respecting KISS proxy in front of dRPC: RPC passthrough + cross-chain portfolio/history."
 
