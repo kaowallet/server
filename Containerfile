@@ -5,7 +5,10 @@ FROM docker.io/library/rust:1-bookworm AS build
 WORKDIR /src
 
 # Only the manifests and source enter the build context (see .dockerignore).
+# xtask is a workspace member, so its manifest must be present for cargo to load
+# the workspace graph — even though `cargo build` only compiles the root package.
 COPY Cargo.toml Cargo.lock ./
+COPY xtask ./xtask
 COPY src ./src
 
 # Cache mounts persist the crate registry and the target dir across builds, so a

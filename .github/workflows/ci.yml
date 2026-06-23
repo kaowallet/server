@@ -61,7 +61,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-vet@0.10.2
+      - uses: taiki-e/install-action@cargo-vet
       - run: cargo vet --locked
