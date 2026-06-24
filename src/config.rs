@@ -74,7 +74,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Config, String> {
         let bind: SocketAddr = std::env::var("BIND_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1:8080".into())
+            .unwrap_or_else(|_| "0.0.0.0:8080".into())
             .parse()
             .map_err(|e| format!("BIND_ADDR invalid: {e}"))?;
 
